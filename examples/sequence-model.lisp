@@ -5,8 +5,8 @@
 ;;; Expected output:
 ;;;   Time step 0 -> state 0.050, output 0.050
 ;;;   Time step 1 -> state 0.129, output 0.129
-;;;   Time step 2 -> state 0.223, output 0.223
-;;;   Time step 3 -> state 0.321, output 0.321
+;;;   Time step 2 -> state 0.224, output 0.224
+;;;   Time step 3 -> state 0.322, output 0.322
 
 (defun step-rnn (state input weight recurrent-weight bias)
   "Single RNN step using tanh activation."

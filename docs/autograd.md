@@ -1,106 +1,108 @@
 # Autograd
 
-The autograd module provides automatic differentiation and gradient computation for the Neuralisp machine learning framework. This module defines variable classes and functions for creating variables that hold tensor values, gradient tensors, and backward functions to compute changes in variables when updating the network.
+The autograd module implements reverse-mode automatic differentiation.  A `variable` wraps a tensor and remembers the
+variables it was computed from; `backward` walks that graph in reverse topological order, so a gradient that reaches a
+node along several paths is summed and delivered exactly once.  Every function described here is covered by
+[`tests/core/test_autograd.lisp`](../tests/core/test_autograd.lisp).
 
 ## Usage
 
-To use the autograd module, import the functions and classes provided by the `neuralisp.core.autograd` package:
+The package exports a symbol named `variable`, which collides with `cl:variable`.  `use-package` will therefore signal
+a name conflict — refer to the package qualified, or import deliberately:
 
 ```common-lisp
-(use-package :neuralisp.core.autograd)
+(defpackage :my-model
+  (:use :cl :neuralisp.core.tensor)
+  (:shadowing-import-from :neuralisp.core.autograd #:variable)
+  (:import-from :neuralisp.core.autograd
+                #:create-variable #:backward #:zero-gradient
+                #:variable-value #:variable-gradient
+                #:variable-add #:variable-multiply))
 ```
 
 ## Classes
 
 ### `variable`
 
-The `variable` class represents an autograd variable and contains the following slots:
+A node in the autograd graph.
 
-- `value`: A tensor that represents the value of the variable.
-- `gradient`: A tensor (or null) that represents the gradient of the variable.
-- `backward`: A function (or null) used for computing the gradients during the backward pass.
+- `value` — the tensor this variable stands for.  Read with `variable-value`.
+- `gradient` — the accumulated gradient tensor, or `nil` when gradients are not tracked.  Accessed with
+  `variable-gradient`.
+- `parents` — the variables this one was computed from; empty for a leaf.  Read with `variable-parents`.
+- `backward-fn` — called with this node's gradient to pass it on to `parents`.  Accessed with `variable-backward`.
+- `requires-grad` — whether gradients accumulate here.  Read with `variable-requires-grad-p`.
 
 ## Functions
 
-### `create-variable` (value &key (requires-grad t) (on-gpu nil))
+### `create-variable` (value &key (requires-grad t))
 
-This function creates a new autograd variable with the input value, a gradient tensor (if requires-grad is true), and sets the backward function to `nil`. If `on-gpu` is true, the created variable and its gradients will be moved to the GPU.
+Wraps the tensor `value` in a leaf variable.  With `requires-grad` true the variable starts with a zero gradient ready
+to accumulate into; otherwise its gradient stays `nil` and gradients flowing to it are discarded.
 
-Arguments:
+There is no `:on-gpu` option: no GPU backend exists yet.
 
-- `value`: A tensor representing the value of the new variable.
-- `requires-grad` (optional, default: `t`): If true, the variable's gradient tensor will be created.
-- `on-gpu` (optional, default: `nil`): If true, the variable's tensor and gradients will be moved to the GPU.
+### `backward` (var &optional gradient)
 
-Returns:
+Propagates `gradient` back from `var` through the graph that produced it, returning `var`.
 
-- A new autograd `variable` instance.
-
-### `backward` (var &optional (grad-output 1.0))
-
-Computes the gradients of the variable with respect to its values and accumulates gradient output.
-
-Arguments:
-
-- `var`: An autograd `variable` to compute gradients for.
-- `grad-output` (optional, default: `1.0`): A scalar value for the gradient output's accumulation.
+- `gradient` defaults to a tensor of ones shaped like `var`'s value.  It is a **tensor**, not a scalar.
+- Gradients accumulate into each variable's `gradient` slot across calls, mirroring the usual training-loop
+  convention.  Call `zero-gradient` between independent backward passes.
+- In-flight gradients are held per-pass rather than in the `gradient` slots, so a second pass starts from a clean seed
+  instead of re-propagating what the first one accumulated.
 
 ### `zero-gradient` (var)
 
-Sets the gradient of the variable to zero.
+Resets `var`'s accumulated gradient to zero, returning `var`.  A no-op on a variable that does not require gradients.
 
-Arguments:
+### `propagate-gradient` (var gradient)
 
-- `var`: An autograd `variable` instance whose gradient will be set to zero.
+Queues `gradient` to reach `var` later in the current backward pass.  This is what a backward function calls to hand a
+gradient to an operand; the traversal delivers it once every contribution has arrived.  Only useful when defining a new
+differentiable operation.
 
-### `partial-grad` (node-a node-b)
+## Differentiable operations
 
-Computes the partial derivatives between two 'variable' nodes.
+- `variable-add` (var-a var-b) — elementwise sum.  `d(a+b)/da = d(a+b)/db = 1`.
+- `variable-multiply` (var-a var-b) — elementwise product.  `d(a*b)/da = b`, `d(a*b)/db = a`.
 
-Arguments:
+These two are what exists today.  Matrix multiply, activations, and losses are not yet differentiable; see
+[ROADMAP.md](../ROADMAP.md).
 
-- `node-a` and `node-b`: `variable` nodes in the computational graph.
+### Defining a new operation
 
-Returns:
-
-- A scalar representing the computed partial gradients.
-
-### `apply-partial-grad` (node-a node-b)
-
-Applies the computed partial gradients of node-b with respect to node-a to the gradients of both nodes.
-
-Arguments:
-
-- `node-a` and `node-b`: `variable` nodes in the computational graph.
+Compute the forward value, record the operands as parents, and give the node a backward function that calls
+`propagate-gradient` on each operand with that operand's local derivative times the incoming gradient.
 
 ## Examples
 
-Creating an autograd variable:
-
 ```common-lisp
-(defparameter *var*
-  (create-variable (make-tensor (list 3 3) '(0.5d0 0.5d0))))
+;; y = x * x, so dy/dx = 2x.  Both operands are the same node; the traversal
+;; visits it once with the summed gradient.
+(let* ((x (create-variable (make-tensor '(2) :data '(3 4))))
+       (y (variable-multiply x x)))
+  (backward y)
+  (tensor-data (variable-gradient x)))       ; => #(6.0d0 8.0d0)
+
+;; z = (a + b) * c  =>  dz/da = dz/db = c, dz/dc = a + b
+(let* ((a (create-variable (make-tensor '(2) :data '(1 2))))
+       (b (create-variable (make-tensor '(2) :data '(3 4))))
+       (c (create-variable (make-tensor '(2) :data '(10 100))))
+       (z (variable-multiply (variable-add a b) c)))
+  (backward z)
+  (values (tensor-data (variable-gradient a))    ; => #(10.0d0 100.0d0)
+          (tensor-data (variable-gradient c))))  ; => #(4.0d0 6.0d0)
+
+;; Seed the pass with an explicit gradient instead of ones.
+(backward z (make-tensor '(2) :data '(2 5)))
+
+;; Clear before an independent pass.
+(zero-gradient a)
 ```
 
-Performing the backward pass on a variable:
+## Not implemented
 
-```common-lisp
-; Assuming *var* has a backward function assigned
-(backward *var*)
-```
-
-Setting the gradient of a variable to zero:
-
-```common-lisp
-(zero-gradient *var*)
-```
-
-Computing and applying partial gradients between variables:
-
-```common-lisp
-; Assuming *var-a* and *var-b* are variables in the computational graph
-(defparameter *partial*
-  (partial-grad *var-a* *var-b*))
-
-(apply-partial-grad *var-a* *var-b*)
-```
+`partial-grad` and `apply-partial-grad`, described in earlier revisions of this document, have been removed.  They
+walked the `backward` slot as though it were a parent pointer and combined gradients with `cl:*` as though tensors were
+numbers; neither could run.  `backward` replaces both.

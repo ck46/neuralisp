@@ -1,23 +1,34 @@
 # NeuraLisp
 
-NeuraLisp is an experimental neural computing environment for Common Lisp.  The current codebase focuses on
-foundational tensor structures, automatic differentiation scaffolding, and the research manifesto that guides the
-future cognitive roadmap.  Many higher-level layers, optimisers, and cognitive agents are still stubs, but the
-supporting infrastructure—documentation, examples, and contributor workflow—is now in place so that the community can
-iterate safely.
+NeuraLisp is an experimental neural computing environment for Common Lisp.  It is at a very early stage: there is a
+working tensor core and a working reverse-mode autograd, and essentially nothing above them.  The layers, optimisers,
+losses, transformers, and cognitive agents described in the roadmap are empty files today.
 
-## Project highlights
+## What actually exists
 
-- **Tensor core prototypes** implemented in [`src/core/tensor.lisp`](src/core/tensor.lisp) for constructing tensors,
-  moving data between CPU/GPU backends, and performing elementary arithmetic.
-- **Autograd scaffolding** in [`src/core/autograd.lisp`](src/core/autograd.lisp) outlining differentiable variables and
-  gradient accumulation primitives for future optimisation work.
-- **GPU hooks** via [`src/core/gpu.lisp`](src/core/gpu.lisp) demonstrating how CUDA bindings will be integrated (the
-  module currently targets `cl-cuda` and is optional during development).
-- **Living manifesto and roadmap** that document the long-term vision and the current development phase.
-- **Runnable example scripts** under [`examples/`](examples) that illustrate a minimal MLP forward pass, a symbolic
-  sequence model sketch, and a cognitive control loop narrative, all instrumented with comments and expected output.
-- **Automated smoke tests** and contribution guidelines that keep documentation, examples, and roadmap updates aligned.
+- **A tensor core** in [`src/core/tensor.lisp`](src/core/tensor.lisp): dense row-major `double-float` tensors,
+  elementwise arithmetic, transpose, matrix multiply, and full/axis reductions.  Covered by unit tests.
+- **Reverse-mode autograd** in [`src/core/autograd.lisp`](src/core/autograd.lisp): differentiable variables, a graph
+  walked in reverse topological order, and gradient accumulation.  Covered by unit tests, including the diamond case
+  where one variable feeds an operation twice.
+- **A GPU placement interface** in [`src/core/gpu.lisp`](src/core/gpu.lisp).  There is **no working device backend**;
+  requesting one signals `gpu-backend-unavailable`.  The module defines the interface a backend must implement.
+- **Examples** under [`examples/`](examples).  Only [`simple-mlp.lisp`](examples/simple-mlp.lisp) uses the library;
+  the other two are standalone illustrative sketches that deliberately depend on nothing.
+- **A manifesto and roadmap** describing where this is meant to go.  Read them as intent, not as description.
+
+Everything is written in ANSI Common Lisp with no external dependencies, so it loads and tests on a bare SBCL.
+
+## Quickstart
+
+### 1. Install dependencies
+
+| Dependency | Purpose | Notes |
+|------------|---------|-------|
+| [SBCL](https://www.sbcl.org/) (or another ANSI Common Lisp) | Runs the NeuraLisp source, tests, and examples | Tested with SBCL 2.2.9; ASDF ships with it |
+
+There are no third-party library dependencies, so Quicklisp is not required.  A future accelerated backend
+([`magicl`](https://github.com/quil-lang/magicl), BLAS, or CUDA) would introduce one, behind the existing entry points.
 
 ## Quickstart
 
@@ -30,65 +41,80 @@ iterate safely.
 | [`magicl`](https://github.com/quil-lang/magicl) | Dense linear algebra backend | Load through Quicklisp (`(ql:quickload :magicl)`) |
 | [`cl-cuda`](https://github.com/takagi/cl-cuda) *(optional)* | CUDA bindings for GPU experiments | Only needed if you intend to evaluate `neuralisp.core.gpu` |
 
-Clone the repository and register the project directory with ASDF (Quicklisp does this automatically when the repo lives
-under `~/quicklisp/local-projects/`):
-
 ```bash
 git clone https://github.com/yourusername/neuralisp.git
 cd neuralisp
 ```
 
-### 2. Load the core packages
-
-From an SBCL/Quicklisp REPL:
+### 2. Load the system
 
 ```lisp
-(ql:quickload :magicl)         ; core tensor backend
-(load "src/core/tensor.lisp")
-(load "src/core/autograd.lisp")
-#+cl-cuda (load "src/core/gpu.lisp")
+(require :asdf)
+(asdf:load-asd (merge-pathnames "neuralisp.asd" (uiop:getcwd)))
+(asdf:load-system "neuralisp")
 ```
 
-If CUDA is unavailable you can skip the GPU module—the tensor and autograd packages do not require it yet.
+Then try it:
+
+```lisp
+(use-package :neuralisp.core.tensor)
+
+;; [[1 2] [3 4]] @ [[5 6] [7 8]] = [[19 22] [43 50]]
+(let ((a (make-tensor '(2 2) :data '(1 2 3 4)))
+      (b (make-tensor '(2 2) :data '(5 6 7 8))))
+  (tensor-ref (tensor-matmul a b) 0 0))          ; => 19.0d0
+
+;; y = x * x, so dy/dx = 2x
+(let* ((x (neuralisp.core.autograd:create-variable (make-tensor '(2) :data '(3 4))))
+       (y (neuralisp.core.autograd:variable-multiply x x)))
+  (neuralisp.core.autograd:backward y)
+  (tensor-data (neuralisp.core.autograd:variable-gradient x)))   ; => #(6.0d0 8.0d0)
+```
+
+`neuralisp.core.autograd` exports a symbol named `variable`, which collides with `cl:variable`.  Refer to it
+package-qualified as above, or import it deliberately with
+`(:shadowing-import-from :neuralisp.core.autograd #:variable)`.
 
 ### 3. Run the examples
 
-Each example is a standalone script that prints its own expected output for quick verification:
-
 ```bash
-sbcl --script examples/simple-mlp.lisp
-sbcl --script examples/sequence-model.lisp
-sbcl --script examples/cognitive-loop.lisp
+sbcl --script examples/simple-mlp.lisp       # uses the tensor core
+sbcl --script examples/sequence-model.lisp   # standalone sketch
+sbcl --script examples/cognitive-loop.lisp   # standalone sketch
 ```
 
-Refer to the inline comments in each script for an explanation of the computation that is being demonstrated.
+Each script's header comment states the output it should produce, and the smoke suite checks that it still does.
 
-### 4. Execute the smoke tests (optional)
-
-The automated smoke suite ensures that documentation and examples stay synchronised.  Run it locally before opening a
-pull request:
+### 4. Run the tests
 
 ```bash
-./tests/run-smoke.sh
+sbcl --script tests/run-tests.lisp   # unit tests only
+./tests/run-smoke.sh                 # unit tests, plus each example's output
 ```
 
-The CI workflow in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) executes the same command on GitHub Actions.
+Both exit non-zero on failure.  The CI workflow in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs
+`run-smoke.sh` on GitHub Actions.
 
 ## Documentation
 
-The `docs/` directory is organised by topic:
+Describing what is implemented — every code snippet in these has been run against the current code:
 
-- [`docs/internals/tensor-autograd.md`](docs/internals/tensor-autograd.md) dives into the tensor storage model and the
-  current automatic differentiation pipeline with architecture diagrams.
-- [`docs/primitives/neural-primitives.md`](docs/primitives/neural-primitives.md) catalogues the differentiable building
-  blocks that exist today and those planned for the next phase.
-- [`docs/cognition/cognitive-modules.md`](docs/cognition/cognitive-modules.md) describes how higher-level cognitive
-  agents will be composed once the primitives mature, complete with flow diagrams and reference code snippets.
-- [`docs/manifesto.md`](docs/manifesto.md) articulates the long-term research manifesto that informs the changelog and
-  roadmap.
+- [`docs/tensor.md`](docs/tensor.md) — the tensor API, including what is *not* supported (broadcasting, rank > 2 axis
+  reductions).
+- [`docs/autograd.md`](docs/autograd.md) — the autograd API and how to define a new differentiable operation.
+- [`docs/internals/tensor-autograd.md`](docs/internals/tensor-autograd.md) — the storage model, the backward
+  traversal, and why it is ordered the way it is.
 
-Start with [`docs/getting_started.md`](docs/getting_started.md) for a lighter introduction, then follow the cross-links
-into the detailed internals.
+Describing intent, not current behaviour:
+
+- [`docs/primitives/neural-primitives.md`](docs/primitives/neural-primitives.md) — planned differentiable building
+  blocks.
+- [`docs/cognition/cognitive-modules.md`](docs/cognition/cognitive-modules.md) — how cognitive agents would be composed
+  once the primitives exist.
+- [`docs/manifesto.md`](docs/manifesto.md) — the long-term research manifesto behind the roadmap.
+
+`docs/getting_started.md`, `docs/layers.md`, `docs/losses.md`, `docs/optimizers.md`, `docs/activations.md`, and
+`docs/transformers.md` are empty placeholder files, as are most modules under `src/` and `tests/`.
 
 ## Contributing
 

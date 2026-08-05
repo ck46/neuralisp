@@ -3,9 +3,9 @@
 ;;; Cognitive loop scenario sketch.
 ;;; Run with: sbcl --script examples/cognitive-loop.lisp
 ;;; Expected output:
-;;;   Normalised sensors: (0.20 0.40 0.80)
+;;;   Normalised sensors: (0.2 0.4 0.8)
 ;;;   Working memory after update: 0.14 0.28 0.50
-;;;   Selected action: track-target
+;;;   Selected action: TRACK-TARGET
 ;;;   Confidence score: 0.376
 
 (defun normalise-sensors (raw-values)

@@ -1,73 +1,93 @@
+;;;; GPU placement interface for NeuraLisp.
+;;;;
+;;;; There is no working GPU backend yet.  This module exists to give the rest
+;;;; of the system one coherent way to talk about device placement, and to fail
+;;;; loudly and specifically when something asks for a device that is not there.
+;;;; It loads without CUDA present, which the previous cl-cuda-based version did
+;;;; not -- it could not even be READ on a CPU-only machine.
+;;;;
+;;;; To supply a real backend, bind *GPU-BACKEND* to an object implementing
+;;;; BACKEND-TO-DEVICE / BACKEND-FROM-DEVICE / BACKEND-FREE.
+
 (defpackage :neuralisp.core.gpu
-  (:use :common-lisp :cl-cuda)
-  (:import-from :neuralisp.core.tensor :tensor :tensor-data :tensor-shape :make-tensor
-                :tensor-gpu-pointer)
-  (:export :initialize-gpu :shutdown-gpu :to-gpu :from-gpu :gpu-allocate :gpu-deallocate
-           :tensor-on-gpu-p :tensor-ensure-on-gpu :tensor-ensure-on-cpu :move-to-gpu :move-to-cpu))
+  (:use :cl)
+  (:import-from :neuralisp.core.tensor
+                #:tensor #:tensor-data #:tensor-shape #:tensor-device
+                #:tensor-gpu-pointer #:make-tensor #:tensor-copy)
+  (:export #:*gpu-backend* #:gpu-available-p #:gpu-backend-unavailable
+           #:backend-to-device #:backend-from-device #:backend-free
+           #:tensor-on-gpu-p #:move-to-gpu #:move-to-cpu
+           #:tensor-ensure-on-gpu #:tensor-ensure-on-cpu))
 (in-package :neuralisp.core.gpu)
 
-(defun initialize-gpu ()
-  "Initialize the GPU and cl-cuda library."
-  (setf cl-cuda.all:use-cache-p t) ; Enable caching of compiled CUDA programs
-  (dolist (platform (cl-cuda.all:get-platform-ids))
-    (dolist (device (cl-cuda.all:get-device-ids platform))
-      (format t "Platform: ~A, Device: ~A~%" platform device))))
+(defvar *gpu-backend* nil
+  "The active GPU backend object, or NIL when no device backend is installed.")
 
-(defun shutdown-gpu ()
-  "Clean up the GPU and cl-cuda library before exiting."
-  (cl-cuda.basic:shutdown))
+(define-condition gpu-backend-unavailable (error)
+  ((operation :initarg :operation :initform nil :reader gpu-backend-unavailable-operation))
+  (:report (lambda (condition stream)
+             (format stream "No GPU backend is installed~@[ (needed by ~a)~]. ~
+Bind NEURALISP.CORE.GPU:*GPU-BACKEND* to a backend object first."
+                     (gpu-backend-unavailable-operation condition))))
+  (:documentation "Signalled when device placement is requested with no backend."))
 
-(defun to-gpu (tensor)
-  "Send the tensor to GPU memory."
-  (let ((tensor-dev-ptr (cublas:allocate (reduce #'* (tensor-shape tensor)))))
-    (cublas:with-cublas
-      (cublas:send-to tensor-dev-ptr (tensor-data tensor) (reduce #'* (tensor-shape tensor))))
-    tensor-dev-ptr))
+(defun gpu-available-p ()
+  "True when a GPU backend is installed."
+  (and *gpu-backend* t))
 
-(defun from-gpu (tensor-dev-ptr shape)
-  "Retrieve tensor from GPU memory, given its device-pointer and shape."
-  (let ((tensor-data (make-array (reduce #'* shape) :element-type 'single-float)))
-    (cublas:with-cublas
-      (cublas:retrieve-from tensor-dev-ptr tensor-data (reduce #'* shape)))
-    (make-tensor tensor-data shape)))
+(defgeneric backend-to-device (backend tensor)
+  (:documentation "Copy TENSOR's contents to the device; return a device handle."))
 
-(defmacro gpu-allocate (var &rest args)
-  "Create and allocate GPU memory for a tensor, storing its device-pointer in the given var."
-  `(let ((,var (cublas:allocate (reduce #'* ',args))))
-     ,var))
+(defgeneric backend-from-device (backend handle shape)
+  (:documentation "Copy the device buffer at HANDLE back into a fresh host tensor of SHAPE."))
 
-(defmacro gpu-deallocate (var)
-  "Deallocate GPU memory associated with a tensor's device-pointer."
-  `(cublas:deallocate ,var))
+(defgeneric backend-free (backend handle)
+  (:documentation "Release the device buffer at HANDLE."))
 
 (defun tensor-on-gpu-p (tensor)
-  "Verify if the provided tensor is stored on the GPU."
-  (eql (tensor-data tensor) :gpu))
+  "True when TENSOR's contents currently live on a device."
+  (eq :gpu (tensor-device tensor)))
 
 (defun move-to-gpu (tensor)
-  "Move the provided tensor to the GPU."
-  (if (tensor-on-gpu-p tensor)
-      tensor
-      (make-instance 'tensor :data :gpu
-                            :shape (tensor-shape tensor))))
+  "Return a tensor whose contents live on the device.
+
+Signals GPU-BACKEND-UNAVAILABLE when no backend is installed, rather than
+returning a tensor that only claims to be on a device."
+  (cond ((tensor-on-gpu-p tensor) tensor)
+        ((null *gpu-backend*) (error 'gpu-backend-unavailable :operation 'move-to-gpu))
+        (t (let ((copy (tensor-copy tensor)))
+             (setf (tensor-gpu-pointer copy) (backend-to-device *gpu-backend* tensor)
+                   (tensor-device copy) :gpu)
+             copy))))
 
 (defun move-to-cpu (tensor)
-  "Move the provided tensor back to the CPU."
+  "Return a tensor whose contents live in host memory."
   (if (tensor-on-gpu-p tensor)
-      (make-instance 'tensor :data (copy-seq (tensor-data tensor)) :shape (tensor-shape tensor))
+      (let ((host (backend-from-device *gpu-backend*
+                                       (tensor-gpu-pointer tensor)
+                                       (tensor-shape tensor))))
+        (setf (tensor-device host) :cpu
+              (tensor-gpu-pointer host) nil)
+        host)
       tensor))
 
 (defun tensor-ensure-on-gpu (tensor)
-  "Ensures tensor's data is on GPU. If not, sends the data to GPU."
+  "Move TENSOR to the device in place, returning it."
   (unless (tensor-on-gpu-p tensor)
-    (setf (tensor-gpu-pointer tensor) (to-gpu tensor))
-    (setf (tensor-data tensor) nil))
+    (when (null *gpu-backend*)
+      (error 'gpu-backend-unavailable :operation 'tensor-ensure-on-gpu))
+    (setf (tensor-gpu-pointer tensor) (backend-to-device *gpu-backend* tensor)
+          (tensor-device tensor) :gpu))
   tensor)
 
 (defun tensor-ensure-on-cpu (tensor)
-  "Ensures tensor's data is on CPU. If not, retrieves the data from GPU."
+  "Move TENSOR back to host memory in place, returning it."
   (when (tensor-on-gpu-p tensor)
-    (setf (tensor-data tensor) (from-gpu (tensor-gpu-pointer tensor) (tensor-shape tensor)))
-    (gpu-deallocate (tensor-gpu-pointer tensor))
-    (setf (tensor-gpu-pointer tensor) nil))
+    (let ((host (backend-from-device *gpu-backend*
+                                     (tensor-gpu-pointer tensor)
+                                     (tensor-shape tensor))))
+      (setf (tensor-data tensor) (tensor-data host))
+      (backend-free *gpu-backend* (tensor-gpu-pointer tensor))
+      (setf (tensor-gpu-pointer tensor) nil
+            (tensor-device tensor) :cpu)))
   tensor)

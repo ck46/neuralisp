@@ -7,7 +7,7 @@ documentation, and workflow.
 ## Getting started
 
 1. Fork the repository and create a feature branch.
-2. Install the dependencies listed in [`README.md`](README.md) (SBCL, Quicklisp, `magicl`, and optionally `cl-cuda`).
+2. Install SBCL.  There are no other dependencies — ASDF ships with SBCL, and the project uses no third-party libraries.
 3. Run the smoke suite before making changes to ensure your environment is wired correctly:
    ```bash
    ./tests/run-smoke.sh
@@ -28,21 +28,27 @@ Every pull request should include the relevant documentation updates:
 
 - Update the appropriate page in `docs/` if you change behaviour or add a new module.  The `docs/internals/` and
   `docs/primitives/` sections describe the canonical structure expected for architecture diagrams and code snippets.
-- Expand the examples if you introduce new workflows.  Each example script must run via `sbcl --script` and print its
-  own expected output for quick verification.
+- Expand the examples if you introduce new workflows.  Each example script must run via `sbcl --script` and carry an
+  `Expected output:` block in its header comment; the smoke suite compares the script's actual output against it, so a
+  stale block fails CI.
+- Code snippets in `docs/` are expected to run as written.  Paste them into a REPL and check the output before
+  committing.
 - Amend [`CHANGELOG.md`](CHANGELOG.md) and [`ROADMAP.md`](ROADMAP.md) when your change advances a manifesto phase.
 
 ## Testing
 
-The repository currently ships with a documentation-focused smoke test:
-
 ```bash
-./tests/run-smoke.sh
+sbcl --script tests/run-tests.lisp   # unit tests only
+./tests/run-smoke.sh                 # unit tests, plus each example's output
 ```
 
-This command checks that the example scripts execute and that critical documentation files exist.  As the tensor and
-autograd libraries stabilise we will extend the suite with unit tests that validate numerical correctness across CPU and
-GPU backends.
+The unit tests live under `tests/` and use the small harness in [`tests/harness.lisp`](tests/harness.lisp) — no
+third-party test library, so `sbcl --script` is enough.  Add tests with `deftest` and the `check`, `check-equal`,
+`check-near`, and `check-signals` macros, then register the file as a component of the `neuralisp/tests` system in
+[`neuralisp.asd`](neuralisp.asd).  Both commands exit non-zero on failure.
+
+**A test must be able to fail.**  Assert on computed values, not on the existence of files or on a script merely not
+crashing.  If you add a check, break the thing it covers once and confirm the suite goes red before you submit.
 
 The CI workflow in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) must stay green.  Please run the smoke suite
 locally before submitting a pull request.

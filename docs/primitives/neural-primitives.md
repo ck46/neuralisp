@@ -33,13 +33,13 @@ components also depend on autograd metadata.
 
 ## Activation functions
 
-`src/activations/` currently defines package scaffolding for the standard set of nonlinearities (ReLU, Sigmoid, Tanh).
-The files will eventually define generic methods that accept `variable` instances and register their backward passes.
+The files under `src/activations/` are empty — there is no activation implementation yet, not even package scaffolding.
+They will eventually define generic methods that accept `variable` instances and register their backward passes.
 During *Phase 1 – Differentiable Primitives* the following checklist will guide implementation:
 
 - [ ] Define a `defgeneric`/`defmethod` pair for each activation that accepts tensors and returns variables.
-- [ ] Register backward lambdas that compose with `partial-grad`.
-- [ ] Provide numerical stability tests that exercise CPU and GPU tensors.
+- [ ] Register backward lambdas that hand gradients to their operands via `propagate-gradient`.
+- [ ] Provide numerical stability tests, run by `tests/run-tests.lisp`.
 
 ## Linear and convolutional layers
 
